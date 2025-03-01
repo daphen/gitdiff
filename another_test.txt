@@ -1,0 +1,10 @@
+# Another Test File
+
+## Configuration
+- Setting 1: Default
+- Setting 2: Enabled
+- Setting 3: Disabled
+
+## Content
+This is some sample content.
+Multiple lines of text.
