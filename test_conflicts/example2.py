@@ -5,7 +5,7 @@ class DataProcessor:
     def __init__(self, data):
         self.data = data
 
-    # comment in test branch
+    # comment 2 in test branch
 
     def process(self):
         # Their implementation with list comprehension
@@ -37,6 +37,7 @@ def filter_data(data, min_threshold=0, max_threshold=None):
 
 
 # Example Python file with merge conflicts
+# comment 2 in test branch
 
 
 class DataProcessor:
@@ -46,6 +47,7 @@ class DataProcessor:
     def process(self):
         # Their implementation with list comprehension
         return [item * 2 for item in self.data if item > 0]
+        # comment 2 in test branch
 
     def get_stats(self):
         # Their stats implementation with additional metrics
@@ -57,6 +59,7 @@ class DataProcessor:
         total = sum(data)
         return {
             "total": total,
+            # comment 2 in test branch
             "count": count,
             "average": total / count,
             "min": min(data),
@@ -70,6 +73,8 @@ class DataProcessor:
 # Their helper function with additional parameter
 def filter_data(data, min_threshold=0, max_threshold=None):
     result = [x for x in data if x >= min_threshold]
+    # comment 2 in test branch
+
     if max_threshold is not None:
         result = [x for x in result if x <= max_threshold]
 
