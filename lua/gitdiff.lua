@@ -4,16 +4,53 @@ local Layout = require("nui.layout")
 
 -- Function to get files with merge conflicts
 local function get_conflict_files()
-	local files = vim.fn.systemlist("git diff --name-only --diff-filter=U")
-	-- Remove any ANSI escape sequences and trim whitespace
+	-- First check if we're in a merge state
+	local is_merging = vim.fn.filereadable(vim.fn.getcwd() .. "/.git/MERGE_HEAD") == 1
+	if not is_merging then
+		return {}
+	end
+
+	-- Get files with conflicts using git ls-files
+	local files = vim.fn.systemlist("git ls-files --unmerged | cut -f2 | sort -u")
+
+	-- Fallback to diff if ls-files doesn't work
+	if #files == 0 then
+		files = vim.fn.systemlist("git diff --name-only --diff-filter=U")
+	end
+
 	local result = {}
+	local seen = {}
+
 	for _, file in ipairs(files) do
-		-- Clean up the filename by removing ANSI codes and trimming
-		file = file:gsub("\27%[[0-9;]*m", ""):gsub("^%s*(.-)%s*$", "%1")
-		if file ~= "" then
-			table.insert(result, { file = file, text = file })
+		-- More comprehensive cleanup of the filename
+		file = file
+			:gsub("\27%[%d*[mBK]", "") -- Remove common ANSI sequences
+			:gsub("\27%([0-9A-Z]", "") -- Remove other escape sequences
+			:gsub("[%z\1-\31]", "") -- Remove control characters (null byte and ASCII 1-31)
+			:gsub("^%s*(.-)%s*$", "%1") -- Trim whitespace
+
+		-- Avoid duplicates
+		if file ~= "" and not seen[file] then
+			-- Check if the file actually has conflict markers
+			local has_conflict_markers = false
+			if vim.fn.filereadable(file) == 1 then
+				local content = vim.fn.readfile(file)
+				for _, line in ipairs(content) do
+					if line:match("^<<<<<<< ") then
+						has_conflict_markers = true
+						break
+					end
+				end
+			end
+
+			-- Only add files that still have conflict markers
+			if has_conflict_markers then
+				seen[file] = true
+				table.insert(result, { file = file, text = file })
+			end
 		end
 	end
+
 	return result
 end
 
@@ -50,9 +87,41 @@ local function get_conflict_chunks(filepath)
 	return chunks
 end
 
+M.current_layout = nil
+
+-- Global function to force close the merge tool
+function M.force_close_merge_tool()
+	if M.current_layout and type(M.current_layout.unmount) == "function" then
+		M.current_layout:unmount()
+		vim.notify("Merge tool forcefully closed", vim.log.levels.INFO)
+		M.merge_tool_active = false
+		M.current_layout = nil
+	end
+end
+
 function M.show_merge_tool()
-	local conflict_files = get_conflict_files()
-	if #conflict_files == 0 then
+	-- Check if we're in a git repository first
+	local is_git_repo_cmd = vim.fn.system("git rev-parse --is-inside-work-tree 2>/dev/null")
+	local is_git_repo = is_git_repo_cmd:match("true")
+	local is_merging = vim.fn.filereadable(vim.fn.getcwd() .. "/.git/MERGE_HEAD") == 1
+
+	-- Get conflict files first
+	local conflict_files = get_conflict_files() or {}
+
+	if not is_git_repo then
+		vim.notify("Not in a git repository", vim.log.levels.ERROR)
+		return
+	end
+
+	if #conflict_files == 0 and is_merging then
+		vim.notify("All conflicts are resolved. You can commit the changes.", vim.log.levels.INFO)
+		return
+	-- If not in a merge state, notify the user
+	elseif not is_merging then
+		vim.notify("Not currently in a merge state", vim.log.levels.INFO)
+		return
+	-- If no conflicts found and not in a merge state, nothing to do
+	elseif #conflict_files == 0 then
 		vim.notify("No files with merge conflicts found", vim.log.levels.INFO)
 		return
 	end
@@ -127,9 +196,9 @@ function M.show_merge_tool()
 	)
 
 	-- Current state
-	local current_file = nil
 	local current_chunks = {}
 	local current_chunk_index = 1
+	local current_file_path = nil
 
 	-- Function to display current chunk
 	local function display_current_chunk()
@@ -138,16 +207,72 @@ function M.show_merge_tool()
 		end
 
 		local chunk = current_chunks[current_chunk_index]
+		-- Use Neovim API to set buffer content
 		vim.api.nvim_buf_set_lines(popup_one.bufnr, 0, -1, false, chunk.ours)
 		vim.api.nvim_buf_set_lines(popup_two.bufnr, 0, -1, false, chunk.theirs)
 
-		-- Update titles
-		vim.api.nvim_win_set_config(popup_one.winid, {
-			title = string.format("Our Changes (%d/%d)", current_chunk_index, #current_chunks),
-		})
-		vim.api.nvim_win_set_config(popup_two.winid, {
-			title = string.format("Incoming Changes (%d/%d)", current_chunk_index, #current_chunks),
-		})
+		-- Update titles with border text
+		popup_one.border:set_text(
+			"top",
+			string.format("Our Changes (%d/%d)", current_chunk_index, #current_chunks),
+			"center"
+		)
+		popup_two.border:set_text(
+			"top",
+			string.format("Incoming Changes (%d/%d)", current_chunk_index, #current_chunks),
+			"center"
+		)
+	end
+
+	-- Function to add a file to git
+	local function git_add_file(filepath)
+		if not filepath or filepath == "" then
+			return false
+		end
+
+		local cmd = "git add " .. vim.fn.shellescape(filepath)
+		local result = vim.fn.system(cmd)
+		local success = vim.v.shell_error == 0
+
+		if success then
+			vim.notify("Added " .. filepath .. " to git index", vim.log.levels.INFO)
+		else
+			vim.notify("Failed to add " .. filepath .. " to git index: " .. result, vim.log.levels.ERROR)
+		end
+
+		return success
+	end
+
+	-- Function to refresh the file list
+	local function refresh_file_list()
+		-- Get updated conflict files
+		conflict_files = get_conflict_files() or {}
+
+		-- Update the file list display
+		local file_lines = {}
+		for _, file in ipairs(conflict_files) do
+			table.insert(file_lines, file.text)
+		end
+		vim.api.nvim_buf_set_lines(file_menu.bufnr, 0, -1, false, file_lines)
+
+		-- If no more conflict files, show a message
+		if #conflict_files == 0 then
+			vim.notify("All conflicts resolved!", vim.log.levels.INFO)
+			-- Clear the diff views
+			vim.api.nvim_buf_set_lines(popup_one.bufnr, 0, -1, false, { "All conflicts resolved!" })
+			vim.api.nvim_buf_set_lines(popup_two.bufnr, 0, -1, false, { "All conflicts resolved!" })
+
+			-- Add all resolved files to git
+			vim.fn.system("git add -u")
+			if vim.v.shell_error == 0 then
+				vim.notify("All resolved files have been staged with 'git add -u'", vim.log.levels.INFO)
+			else
+				vim.notify("Failed to stage resolved files", vim.log.levels.ERROR)
+			end
+
+			return true
+		end
+		return false
 	end
 
 	-- Function to load file conflicts
@@ -165,14 +290,42 @@ function M.show_merge_tool()
 			return
 		end
 
-		current_file = full_path
+		current_file_path = filepath
 		current_chunks = get_conflict_chunks(full_path)
 		current_chunk_index = 1
+
+		-- If no more chunks in this file, mark it as resolved
+		if #current_chunks == 0 then
+			vim.notify("All conflicts in " .. filepath .. " resolved!", vim.log.levels.INFO)
+
+			-- Add the resolved file to git
+			git_add_file(filepath)
+
+			-- Refresh the file list to remove this file
+			if refresh_file_list() then
+				return -- All files resolved
+			end
+
+			-- Load the next file if available
+			if #conflict_files > 0 then
+				load_file(conflict_files[1].file)
+			end
+			return
+		end
+
+		-- Set the filetype for the buffers based on the file extension
+		local filetype = vim.filetype.match({ filename = filepath })
+		if filetype then
+			vim.api.nvim_set_option_value("filetype", filetype, { buf = popup_one.bufnr })
+			vim.api.nvim_set_option_value("filetype", filetype, { buf = popup_two.bufnr })
+		end
+
 		display_current_chunk()
 	end
 
-	-- Mount layout
+	-- Mount layout and store reference globally
 	layout:mount()
+	M.current_layout = layout
 
 	-- Set up file list
 	local file_lines = {}
@@ -180,6 +333,18 @@ function M.show_merge_tool()
 		table.insert(file_lines, file.text)
 	end
 	vim.api.nvim_buf_set_lines(file_menu.bufnr, 0, -1, false, file_lines)
+
+	-- Add file selection functionality
+	vim.keymap.set("n", "<CR>", function()
+		local line = vim.api.nvim_win_get_cursor(file_menu.winid)[1]
+		if line <= #conflict_files then
+			load_file(conflict_files[line].file)
+		end
+	end, {
+		buffer = file_menu.bufnr,
+		noremap = true,
+		silent = true,
+	})
 
 	-- Navigation functions
 	local function next_chunk()
@@ -223,11 +388,123 @@ function M.show_merge_tool()
 		end
 	end
 
+	-- Functions to choose ours or theirs for the current chunk only
+	local function choose_ours()
+		if #current_chunks == 0 or not current_file_path then
+			vim.notify("No conflict chunk selected", vim.log.levels.ERROR)
+			return
+		end
+
+		-- Read the current file content
+		local full_path = vim.fn.getcwd() .. "/" .. current_file_path
+		local content = vim.fn.readfile(full_path)
+
+		-- Find and replace the current conflict chunk
+		local chunk_count = 0
+		local in_conflict = false
+		local conflict_start = nil
+		local conflict_end = nil
+
+		for i, line in ipairs(content) do
+			if line:match("^<<<<<<< ") then
+				chunk_count = chunk_count + 1
+				if chunk_count == current_chunk_index then
+					in_conflict = true
+					conflict_start = i
+				end
+			elseif line:match("^>>>>>>> ") and in_conflict then
+				in_conflict = false
+				conflict_end = i
+			end
+		end
+
+		-- Replace the conflict with our content
+		if conflict_start and conflict_end then
+			local new_content = {}
+			for i, line in ipairs(content) do
+				if i < conflict_start or i > conflict_end then
+					table.insert(new_content, line)
+				elseif i == conflict_start then
+					-- Insert our content instead of the conflict markers
+					for _, l in ipairs(current_chunks[current_chunk_index].ours) do
+						table.insert(new_content, l)
+					end
+				end
+			end
+
+			-- Write the modified content back to the file
+			vim.fn.writefile(new_content, full_path)
+			vim.notify("Applied our version for chunk " .. current_chunk_index, vim.log.levels.INFO)
+
+			-- Reload the file
+			load_file(current_file_path)
+		else
+			vim.notify("Could not locate the current conflict chunk", vim.log.levels.ERROR)
+		end
+	end
+
+	local function choose_theirs()
+		if #current_chunks == 0 or not current_file_path then
+			vim.notify("No conflict chunk selected", vim.log.levels.ERROR)
+			return
+		end
+
+		-- Read the current file content
+		local full_path = vim.fn.getcwd() .. "/" .. current_file_path
+		local content = vim.fn.readfile(full_path)
+
+		-- Find and replace the current conflict chunk
+		local chunk_count = 0
+		local in_conflict = false
+		local conflict_start = nil
+		local conflict_end = nil
+
+		for i, line in ipairs(content) do
+			if line:match("^<<<<<<< ") then
+				chunk_count = chunk_count + 1
+				if chunk_count == current_chunk_index then
+					in_conflict = true
+					conflict_start = i
+				end
+			elseif line:match("^>>>>>>> ") and in_conflict then
+				in_conflict = false
+				conflict_end = i
+			end
+		end
+
+		-- Replace the conflict with their content
+		if conflict_start and conflict_end then
+			local new_content = {}
+			for i, line in ipairs(content) do
+				if i < conflict_start or i > conflict_end then
+					table.insert(new_content, line)
+				elseif i == conflict_start then
+					-- Insert their content instead of the conflict markers
+					for _, l in ipairs(current_chunks[current_chunk_index].theirs) do
+						table.insert(new_content, l)
+					end
+				end
+			end
+
+			-- Write the modified content back to the file
+			vim.fn.writefile(new_content, full_path)
+			vim.notify("Applied their version for chunk " .. current_chunk_index, vim.log.levels.INFO)
+
+			-- Reload the file
+			load_file(current_file_path)
+		else
+			vim.notify("Could not locate the current conflict chunk", vim.log.levels.ERROR)
+		end
+	end
+
+	-- Remove the global emergency escape that's not working
+
 	-- Add keymaps for all popups
 	for _, popup in ipairs({ popup_one, popup_two, file_menu }) do
 		-- Close with q
 		vim.keymap.set("n", "q", function()
 			layout:unmount()
+			M.merge_tool_active = false
 		end, {
 			buffer = popup.bufnr,
 			noremap = true,
@@ -289,6 +566,153 @@ function M.show_merge_tool()
 			noremap = true,
 			silent = true,
 		})
+
+		-- Choose ours with 1 or o
+		vim.keymap.set("n", "1", choose_ours, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
+		vim.keymap.set("n", "o", choose_ours, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
+
+		-- Choose theirs with 2 or t
+		vim.keymap.set("n", "2", choose_theirs, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
+		vim.keymap.set("n", "t", choose_theirs, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
+
+		-- Choose both (combine) with 3 or b
+		vim.keymap.set("n", "3", function()
+			if #current_chunks == 0 or not current_file_path then
+				vim.notify("No conflict chunk selected", vim.log.levels.ERROR)
+				return
+			end
+
+			-- Read the current file content
+			local full_path = vim.fn.getcwd() .. "/" .. current_file_path
+			local content = vim.fn.readfile(full_path)
+
+			-- Find and replace the current conflict chunk
+			local chunk_count = 0
+			local in_conflict = false
+			local conflict_start = nil
+			local conflict_end = nil
+
+			for i, line in ipairs(content) do
+				if line:match("^<<<<<<< ") then
+					chunk_count = chunk_count + 1
+					if chunk_count == current_chunk_index then
+						in_conflict = true
+						conflict_start = i
+					end
+				elseif line:match("^>>>>>>> ") and in_conflict then
+					in_conflict = false
+					conflict_end = i
+				end
+			end
+
+			-- Replace the conflict with both contents
+			if conflict_start and conflict_end then
+				local new_content = {}
+				for i, line in ipairs(content) do
+					if i < conflict_start or i > conflict_end then
+						table.insert(new_content, line)
+					elseif i == conflict_start then
+						-- Insert both contents instead of the conflict markers
+						for _, l in ipairs(current_chunks[current_chunk_index].ours) do
+							table.insert(new_content, l)
+						end
+						for _, l in ipairs(current_chunks[current_chunk_index].theirs) do
+							table.insert(new_content, l)
+						end
+					end
+				end
+
+				-- Write the modified content back to the file
+				vim.fn.writefile(new_content, full_path)
+				vim.notify("Combined both versions for chunk " .. current_chunk_index, vim.log.levels.INFO)
+
+				-- Reload the file
+				load_file(current_file_path)
+			else
+				vim.notify("Could not locate the current conflict chunk", vim.log.levels.ERROR)
+			end
+		end, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
+
+		vim.keymap.set("n", "b", function()
+			if #current_chunks == 0 or not current_file_path then
+				vim.notify("No conflict chunk selected", vim.log.levels.ERROR)
+				return
+			end
+
+			-- Read the current file content
+			local full_path = vim.fn.getcwd() .. "/" .. current_file_path
+			local content = vim.fn.readfile(full_path)
+
+			-- Find and replace the current conflict chunk
+			local chunk_count = 0
+			local in_conflict = false
+			local conflict_start = nil
+			local conflict_end = nil
+
+			for i, line in ipairs(content) do
+				if line:match("^<<<<<<< ") then
+					chunk_count = chunk_count + 1
+					if chunk_count == current_chunk_index then
+						in_conflict = true
+						conflict_start = i
+					end
+				elseif line:match("^>>>>>>> ") and in_conflict then
+					in_conflict = false
+					conflict_end = i
+				end
+			end
+
+			-- Replace the conflict with both contents
+			if conflict_start and conflict_end then
+				local new_content = {}
+				for i, line in ipairs(content) do
+					if i < conflict_start or i > conflict_end then
+						table.insert(new_content, line)
+					elseif i == conflict_start then
+						-- Insert both contents instead of the conflict markers
+						for _, l in ipairs(current_chunks[current_chunk_index].ours) do
+							table.insert(new_content, l)
+						end
+						for _, l in ipairs(current_chunks[current_chunk_index].theirs) do
+							table.insert(new_content, l)
+						end
+					end
+				end
+
+				-- Write the modified content back to the file
+				vim.fn.writefile(new_content, full_path)
+				vim.notify("Combined both versions for chunk " .. current_chunk_index, vim.log.levels.INFO)
+
+				-- Reload the file
+				load_file(current_file_path)
+			else
+				vim.notify("Could not locate the current conflict chunk", vim.log.levels.ERROR)
+			end
+		end, {
+			buffer = popup.bufnr,
+			noremap = true,
+			silent = true,
+		})
 	end
 
 	-- Load the first file automatically
@@ -297,6 +721,19 @@ function M.show_merge_tool()
 		-- Focus the file menu initially
 		switch_focus(file_menu)
 	end
+
+	-- Add file click handler
+	vim.api.nvim_create_autocmd("CursorMoved", {
+		buffer = file_menu.bufnr,
+		callback = function()
+			-- Highlight the current line
+			vim.api.nvim_buf_clear_namespace(file_menu.bufnr, -1, 0, -1)
+			local line = vim.api.nvim_win_get_cursor(file_menu.winid)[1] - 1
+			if line < #conflict_files then
+				vim.api.nvim_buf_add_highlight(file_menu.bufnr, -1, "Visual", line, 0, -1)
+			end
+		end,
+	})
 
 	-- Add autocmd to prevent focus loss
 	vim.api.nvim_create_autocmd("WinLeave", {
@@ -312,6 +749,14 @@ function M.show_merge_tool()
 			end
 		end,
 	})
+
+	-- Make sure to clean up when unmounting
+	local original_unmount = layout.unmount
+	layout.unmount = function(...)
+		M.merge_tool_active = false
+		M.current_layout = nil
+		return original_unmount(...)
+	end
 end
 
 return M
