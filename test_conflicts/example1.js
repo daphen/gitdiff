@@ -2,6 +2,8 @@
 
 function calculateTotal1(items) {
   // Their implementation
+  // Their implementation test 1
+
   let sum = 0;
   for (const item of items) {
     sum += item.price * item.quantity;
@@ -28,12 +30,14 @@ module.exports = {
   calculateTotal1,
   formatCurrency,
   parsePrice: (str) => parseFloat(str.replace(/[^\d.]/g, "")),
+  // Their implementation test 1
 };
 // Example JavaScript file with merge conflicts
-// Adding in test branch
+// Adding in test branch 1
 
 function calculateTotal(items) {
   // Their implementation
+  // Their implementation test 1
   let sum = 0;
   for (const item of items) {
     sum += item.price * item.quantity;

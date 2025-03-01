@@ -5,7 +5,7 @@ class DataProcessor:
     def __init__(self, data):
         self.data = data
 
-    # comment in test branch
+    # comment in test1 branch
 
     def process(self):
         # Their implementation with list comprehension
@@ -13,6 +13,7 @@ class DataProcessor:
 
     def get_stats(self):
         # Their stats implementation with additional metrics
+        # Their stats implementation2 with additional metrics
         data = [x for x in self.data if x is not None]
         count = len(data)
         if not count:
@@ -45,6 +46,8 @@ class DataProcessor:
 
     def process(self):
         # Their implementation with list comprehension
+        # Their stats implementation test 1 with additional metrics
+
         return [item * 2 for item in self.data if item > 0]
 
     def get_stats(self):
@@ -74,5 +77,6 @@ def filter_data(data, min_threshold=0, max_threshold=None):
         result = [x for x in result if x <= max_threshold]
 
     # comment in test branch
+    # Their stats implementation test 1 with additional metrics
 
     return result
