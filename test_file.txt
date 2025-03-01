@@ -1,12 +1,12 @@
 # Test File for Git Merge Conflicts
 
 ## Section 1
-This is the first section of our test file.
-It contains some basic text that we'll modify differently in two branches.
+This is the first section of our test file with MAIN BRANCH UPDATES.
+It contains some basic text that we've improved in the main branch.
 
 ## Section 2
-This is the second section.
-We'll also change this part in different ways.
+This is the second section with MAIN BRANCH CHANGES.
+We've made this more concise and clear.
 
 ## Section 3
 This is the final section of our test file.
